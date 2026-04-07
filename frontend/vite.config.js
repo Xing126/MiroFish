@@ -13,12 +13,15 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    strictPort: true,
     open: true,
     proxy: {
       '/api': {
         target: 'http://localhost:5001',
         changeOrigin: true,
-        secure: false
+        secure: false,
+        timeout: 600000, // 10分钟代理超时
+        proxyTimeout: 600000 // 10分钟代理响应超时
       }
     }
   }

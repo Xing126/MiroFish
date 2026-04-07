@@ -428,7 +428,6 @@ class ParallelIPCHandler:
         # 按平台分组
         twitter_interviews = []
         reddit_interviews = []
-        both_platforms_interviews = []  # 需要同时采访两个平台的
         
         for interview in interviews:
             item_platform = interview.get("platform", platform)
@@ -438,77 +437,85 @@ class ParallelIPCHandler:
                 reddit_interviews.append(interview)
             else:
                 # 未指定平台：两个平台都采访
-                both_platforms_interviews.append(interview)
-        
-        # 把 both_platforms_interviews 拆分到两个平台
-        if both_platforms_interviews:
-            if self.twitter_env:
-                twitter_interviews.extend(both_platforms_interviews)
-            if self.reddit_env:
-                reddit_interviews.extend(both_platforms_interviews)
+                if self.twitter_env:
+                    twitter_interviews.append(interview)
+                if self.reddit_env:
+                    reddit_interviews.append(interview)
         
         results = {}
         
-        # 处理Twitter平台的采访
-        if twitter_interviews and self.twitter_env:
-            try:
-                twitter_actions = {}
-                for interview in twitter_interviews:
-                    agent_id = interview.get("agent_id")
-                    prompt = interview.get("prompt", "")
-                    try:
-                        agent = self.twitter_agent_graph.get_agent(agent_id)
-                        twitter_actions[agent] = ManualAction(
-                            action_type=ActionType.INTERVIEW,
-                            action_args={"prompt": prompt}
-                        )
-                    except Exception as e:
-                        print(f"  警告: 无法获取Twitter Agent {agent_id}: {e}")
-                
-                if twitter_actions:
-                    await self.twitter_env.step(twitter_actions)
-                    
-                    for interview in twitter_interviews:
-                        agent_id = interview.get("agent_id")
-                        result = self._get_interview_result(agent_id, "twitter")
-                        result["platform"] = "twitter"
-                        results[f"twitter_{agent_id}"] = result
-            except Exception as e:
-                print(f"  Twitter批量Interview失败: {e}")
+        # 准备执行任务
+        tasks = []
+        platform_order = []
         
-        # 处理Reddit平台的采访
+        # 准备Twitter任务
+        twitter_actions = {}
+        if twitter_interviews and self.twitter_env:
+            for interview in twitter_interviews:
+                agent_id = interview.get("agent_id")
+                prompt = interview.get("prompt", "")
+                try:
+                    agent = self.twitter_agent_graph.get_agent(agent_id)
+                    twitter_actions[agent] = ManualAction(
+                        action_type=ActionType.INTERVIEW,
+                        action_args={"prompt": prompt}
+                    )
+                except Exception as e:
+                    print(f"  警告: 无法获取Twitter Agent {agent_id}: {e}")
+            
+            if twitter_actions:
+                tasks.append(self.twitter_env.step(twitter_actions))
+                platform_order.append("twitter")
+        
+        # 准备Reddit任务
+        reddit_actions = {}
         if reddit_interviews and self.reddit_env:
+            for interview in reddit_interviews:
+                agent_id = interview.get("agent_id")
+                prompt = interview.get("prompt", "")
+                try:
+                    agent = self.reddit_agent_graph.get_agent(agent_id)
+                    reddit_actions[agent] = ManualAction(
+                        action_type=ActionType.INTERVIEW,
+                        action_args={"prompt": prompt}
+                    )
+                except Exception as e:
+                    print(f"  警告: 无法获取Reddit Agent {agent_id}: {e}")
+            
+            if reddit_actions:
+                tasks.append(self.reddit_env.step(reddit_actions))
+                platform_order.append("reddit")
+        
+        # 并行执行步进
+        if tasks:
+            print(f"  开始执行并行步进: {platform_order}")
             try:
-                reddit_actions = {}
-                for interview in reddit_interviews:
-                    agent_id = interview.get("agent_id")
-                    prompt = interview.get("prompt", "")
-                    try:
-                        agent = self.reddit_agent_graph.get_agent(agent_id)
-                        reddit_actions[agent] = ManualAction(
-                            action_type=ActionType.INTERVIEW,
-                            action_args={"prompt": prompt}
-                        )
-                    except Exception as e:
-                        print(f"  警告: 无法获取Reddit Agent {agent_id}: {e}")
-                
-                if reddit_actions:
-                    await self.reddit_env.step(reddit_actions)
-                    
-                    for interview in reddit_interviews:
-                        agent_id = interview.get("agent_id")
-                        result = self._get_interview_result(agent_id, "reddit")
-                        result["platform"] = "reddit"
-                        results[f"reddit_{agent_id}"] = result
+                await asyncio.gather(*tasks)
             except Exception as e:
-                print(f"  Reddit批量Interview失败: {e}")
+                print(f"  并行步进执行失败: {e}")
+        
+        # 收集Twitter结果
+        if twitter_actions:
+            for interview in twitter_interviews:
+                agent_id = interview.get("agent_id")
+                result = self._get_interview_result(agent_id, "twitter")
+                result["platform"] = "twitter"
+                results[f"twitter_{agent_id}"] = result
+        
+        # 收集Reddit结果
+        if reddit_actions:
+            for interview in reddit_interviews:
+                agent_id = interview.get("agent_id")
+                result = self._get_interview_result(agent_id, "reddit")
+                result["platform"] = "reddit"
+                results[f"reddit_{agent_id}"] = result
         
         if results:
             self.send_response(command_id, "completed", result={
                 "interviews_count": len(results),
                 "results": results
             })
-            print(f"  批量Interview完成: {len(results)} 个Agent")
+            print(f"  批量Interview完成: {len(results)} 个Agent结果")
             return True
         else:
             self.send_response(command_id, "failed", error="没有成功的采访")
@@ -1210,6 +1217,9 @@ async def run_twitter_simulation(
     if action_logger:
         action_logger.log_round_end(0, initial_action_count)
     
+    # 初始轮次在终端有进度反馈
+    log_info(f"Day 1, 00:00 - Round 0 (初始事件) | 动作: {initial_action_count}")
+    
     # 主模拟循环
     time_config = config.get("time_config", {})
     total_hours = time_config.get("total_simulation_hours", 72)
@@ -1274,9 +1284,9 @@ async def run_twitter_simulation(
         if action_logger:
             action_logger.log_round_end(round_num + 1, round_action_count)
         
-        if (round_num + 1) % 20 == 0:
-            progress = (round_num + 1) / total_rounds * 100
-            log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%)")
+        # 每一个轮次在终端有进度反馈
+        progress = (round_num + 1) / total_rounds * 100
+        log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%) | 活跃: {len(active_agents)}, 动作: {round_action_count}")
     
     # 注意：不关闭环境，保留给Interview使用
     
@@ -1409,6 +1419,9 @@ async def run_reddit_simulation(
     if action_logger:
         action_logger.log_round_end(0, initial_action_count)
     
+    # 初始轮次在终端有进度反馈
+    log_info(f"Day 1, 00:00 - Round 0 (初始事件) | 动作: {initial_action_count}")
+    
     # 主模拟循环
     time_config = config.get("time_config", {})
     total_hours = time_config.get("total_simulation_hours", 72)
@@ -1473,9 +1486,9 @@ async def run_reddit_simulation(
         if action_logger:
             action_logger.log_round_end(round_num + 1, round_action_count)
         
-        if (round_num + 1) % 20 == 0:
-            progress = (round_num + 1) / total_rounds * 100
-            log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%)")
+        # 每一个轮次在终端有进度反馈
+        progress = (round_num + 1) / total_rounds * 100
+        log_info(f"Day {simulated_day}, {simulated_hour:02d}:00 - Round {round_num + 1}/{total_rounds} ({progress:.1f}%) | 活跃: {len(active_agents)}, 动作: {round_action_count}")
     
     # 注意：不关闭环境，保留给Interview使用
     

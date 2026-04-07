@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, List
 from openai import OpenAI
 
 from ..config import Config
+from .logger import info as log_info
 
 
 class LLMClient:
@@ -61,6 +62,7 @@ class LLMClient:
         if response_format:
             kwargs["response_format"] = response_format
         
+        log_info(f"正在进行 LLM API 调用 (模型: {self.model})")
         response = self.client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content
         # 部分模型（如MiniMax M2.5）会在content中包含<think>思考内容，需要移除

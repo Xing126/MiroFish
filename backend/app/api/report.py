@@ -6,7 +6,12 @@ Report API路由
 import os
 import traceback
 import threading
-from flask import request, jsonify, send_file
+import io
+from flask import Blueprint, request, jsonify, send_file, Response
+try:
+    from fpdf import FPDF
+except ImportError:
+    FPDF = None
 
 from . import report_bp
 from ..config import Config
@@ -398,11 +403,10 @@ def list_reports():
 @report_bp.route('/<report_id>/download', methods=['GET'])
 def download_report(report_id: str):
     """
-    下载报告（Markdown格式）
-    
-    返回Markdown文件
+    下载报告（支持 Markdown 和 PDF 格式）
     """
     try:
+        export_format = request.args.get('format', 'md').lower()
         report = ReportManager.get_report(report_id)
         
         if not report:
@@ -410,28 +414,191 @@ def download_report(report_id: str):
                 "success": False,
                 "error": t('api.reportNotFound', id=report_id)
             }), 404
+            
+        if export_format == 'pdf':
+            # 生成 PDF
+            try:
+                if not FPDF:
+                    return jsonify({"success": False, "error": "fpdf2 library not installed"}), 500
+                
+                class ReportPDF(FPDF):
+                    def header(self):
+                        pass
+                    
+                    def footer(self):
+                        self.set_y(-15)
+                        self.set_font("msyh", "", 8)
+                        self.set_text_color(150, 150, 150)
+                        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+                # 创建 PDF 对象
+                pdf = ReportPDF()
+                
+                # 尝试加载微软雅黑、宋体和楷体（支持中英双重风格与加粗/斜体）
+                font_configs = [
+                    # Family, Style, Path
+                    ("msyh", "", "C:\\Windows\\Fonts\\msyh.ttc"),
+                    ("msyh", "B", "C:\\Windows\\Fonts\\msyhbd.ttc"),
+                    ("simsun", "", "C:\\Windows\\Fonts\\simsun.ttc"),
+                    ("simsun", "I", "C:\\Windows\\Fonts\\simkai.ttf"), # 楷体常作为衬线体的斜体替代
+                ]
+                
+                fonts_loaded = {"msyh": False, "simsun": False}
+                for family, style, path in font_configs:
+                    if os.path.exists(path):
+                        try:
+                            pdf.add_font(family, style, path)
+                            fonts_loaded[family] = True
+                        except Exception as fe:
+                            logger.error(f"Failed to load font {path}: {str(fe)}")
+                
+                # 补充缺失的样式变体，防止 markdown 渲染时报错
+                if fonts_loaded["msyh"]:
+                    # 如果没有独立的斜体/粗斜体，暂用已有变体代替
+                    pdf.add_font("msyh", "I", "C:\\Windows\\Fonts\\msyh.ttc")
+                    pdf.add_font("msyh", "BI", "C:\\Windows\\Fonts\\msyhbd.ttc")
+                if fonts_loaded["simsun"]:
+                    # 宋体加粗通常由系统加黑，fpdf2 不支持自动加黑，暂用普通或楷体
+                    pdf.add_font("simsun", "B", "C:\\Windows\\Fonts\\simsun.ttc")
+                    pdf.add_font("simsun", "BI", "C:\\Windows\\Fonts\\simkai.ttf")
+                
+                # 默认字体设置
+                base_font = "msyh" if fonts_loaded["msyh"] else "Helvetica"
+                serif_font = "simsun" if fonts_loaded["simsun"] else base_font
+                
+                pdf.set_font(base_font, size=10)
+                pdf.add_page()
+                pdf.set_auto_page_break(auto=True, margin=20)
+                
+                # 设置边距
+                pdf.set_left_margin(20)
+                pdf.set_right_margin(20)
+                
+                content = report.markdown_content
+                lines = content.split('\n')
+                
+                # 1. 渲染页眉 Meta
+                pdf.set_y(20)
+                # Tag: Prediction Report
+                pdf.set_fill_color(240, 245, 255)
+                pdf.set_text_color(60, 100, 220)
+                pdf.set_font(base_font, "B", 9)
+                tag_text = "Prediction Report"
+                tag_width = pdf.get_string_width(tag_text) + 6
+                pdf.cell(tag_width, 7, tag_text, fill=True, align="C")
+                
+                # ID
+                pdf.set_x(pdf.w - 20 - 50)
+                pdf.set_text_color(150, 150, 150)
+                pdf.set_font(base_font, "", 9)
+                pdf.cell(50, 7, f"ID: {report_id}", align="R")
+                pdf.ln(12)
+                
+                section_count = 0
+                
+                i = 0
+                while i < len(lines):
+                    line = lines[i].strip()
+                    
+                    if not line:
+                        pdf.ln(2)
+                        i += 1
+                        continue
+                        
+                    # 主标题 (h1)
+                    if line.startswith('# '):
+                        pdf.set_text_color(30, 40, 60)
+                        pdf.set_font(serif_font, "", 22) # 使用宋体/Serif
+                        pdf.multi_cell(0, 10, line[2:], markdown=True)
+                        pdf.ln(2)
+                    
+                    # 引用 (Subtitle or Blockquote)
+                    elif line.startswith('> '):
+                        # 检查是否是主标题下的副标题 (p.sub-title)
+                        if i > 0 and lines[i-2].strip().startswith('# '):
+                            pdf.set_text_color(100, 105, 120)
+                            pdf.set_font(serif_font, "I", 12) # 副标题使用斜体 (楷体)
+                            pdf.multi_cell(0, 7, line[2:], markdown=True)
+                        else:
+                            # 普通引用块 (blockquote)
+                            pdf.set_fill_color(248, 249, 250)
+                            pdf.set_text_color(80, 85, 100)
+                            pdf.set_font(serif_font, "I", 10) # 引用块使用斜体 (楷体)
+                            current_x = pdf.get_x()
+                            current_y = pdf.get_y()
+                            pdf.set_draw_color(200, 200, 200)
+                            pdf.line(current_x, current_y, current_x, current_y + 10)
+                            pdf.set_x(current_x + 5)
+                            pdf.multi_cell(0, 6, line[2:], fill=True, markdown=True)
+                        pdf.ln(4)
+                    
+                    # 分割线
+                    elif line.startswith('---'):
+                        pdf.set_draw_color(230, 230, 230)
+                        pdf.line(20, pdf.get_y() + 5, pdf.w - 20, pdf.get_y() + 5)
+                        pdf.ln(10)
+                    
+                    # 章节标题 (h3)
+                    elif line.startswith('## '):
+                        section_count += 1
+                        pdf.ln(5)
+                        # 章节编号
+                        pdf.set_text_color(180, 180, 180)
+                        pdf.set_font(base_font, "B", 14)
+                        pdf.cell(15, 10, f"{section_count:02d}")
+                        # 章节标题
+                        pdf.set_text_color(40, 45, 60)
+                        pdf.set_font(serif_font, "", 16) # 章节标题用 Serif
+                        pdf.multi_cell(0, 10, line[3:], markdown=True)
+                        pdf.ln(2)
+                        
+                    # 粗体行或普通段落 (p)
+                    else:
+                        pdf.set_text_color(50, 55, 70)
+                        pdf.set_font(base_font, "", 10) # 正文用微软雅黑/Sans-serif
+                        pdf.multi_cell(0, 6, line, markdown=True)
+                        pdf.ln(2)
+                    
+                    i += 1
+                
+                # 生成内存流
+                pdf_output = io.BytesIO(pdf.output())
+                pdf_output.seek(0)
+                
+                return send_file(
+                    pdf_output,
+                    mimetype='application/pdf',
+                    as_attachment=True,
+                    download_name=f"MiroFish_Report_{report_id}.pdf"
+                )
+            except Exception as e:
+                logger.error(f"Error generating PDF: {str(e)}")
+                return jsonify({"success": False, "error": f"PDF generation failed: {str(e)}"}), 500
         
-        md_path = ReportManager._get_report_markdown_path(report_id)
-        
-        if not os.path.exists(md_path):
-            # 如果MD文件不存在，生成一个临时文件
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
-                f.write(report.markdown_content)
-                temp_path = f.name
+        else:
+            # 默认下载 Markdown
+            md_path = ReportManager._get_report_markdown_path(report_id)
+            
+            if not os.path.exists(md_path):
+                # 如果MD文件不存在，生成一个临时文件
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
+                    f.write(report.markdown_content)
+                    temp_path = f.name
+                
+                return send_file(
+                    temp_path,
+                    as_attachment=True,
+                    download_name=f"MiroFish_Report_{report_id}.md"
+                )
             
             return send_file(
-                temp_path,
+                md_path,
+                mimetype='text/markdown',
                 as_attachment=True,
-                download_name=f"{report_id}.md"
+                download_name=f"MiroFish_Report_{report_id}.md"
             )
-        
-        return send_file(
-            md_path,
-            as_attachment=True,
-            download_name=f"{report_id}.md"
-        )
-        
+            
     except Exception as e:
         logger.error(f"下载报告失败: {str(e)}")
         return jsonify({

@@ -8,8 +8,30 @@
           <!-- Report Header -->
           <div class="report-header-block">
             <div class="report-meta">
-              <span class="report-tag">Prediction Report</span>
-              <span class="report-id">ID: {{ reportId || 'REF-2024-X92' }}</span>
+              <div class="meta-left">
+                <span class="report-tag">Prediction Report</span>
+                <span class="report-id">ID: {{ reportId || 'REF-2024-X92' }}</span>
+              </div>
+              <div class="meta-right">
+                <div class="download-group">
+                  <button class="download-btn" @click="downloadReport('md')" :title="$t('report.downloadMD')">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="7 10 12 15 17 10"></polyline>
+                      <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    <span>MD</span>
+                  </button>
+                  <button class="download-btn" @click="downloadReport('pdf')" :title="$t('report.downloadPDF')">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="7 10 12 15 17 10"></polyline>
+                      <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    <span>PDF</span>
+                  </button>
+                </div>
+              </div>
             </div>
             <h1 class="main-title">{{ reportOutline.title }}</h1>
             <p class="sub-title">{{ reportOutline.summary }}</p>
@@ -478,6 +500,20 @@ const toggleSectionCollapse = (idx) => {
     newSet.add(idx)
   }
   collapsedSections.value = newSet
+}
+
+// 下载报告
+const downloadReport = (format) => {
+  if (!props.reportId) return
+  
+  // 使用配置的 API 基础路径，如果没有则使用相对路径 /api (Vite 代理会处理)
+  const baseUrl = import.meta.env.VITE_API_BASE_URL || ''
+  const url = `${baseUrl}/api/report/${props.reportId}/download?format=${format}`
+  
+  window.open(url, '_blank')
+  
+  // 记录日志
+  addLog(t('log.downloadingReport', { format: format.toUpperCase() }))
 }
 
 const selectChatTarget = (target) => {
@@ -1031,8 +1067,45 @@ watch(() => props.simulationId, (newId) => {
 .report-meta {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
   margin-bottom: 24px;
+}
+
+.meta-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.download-group {
+  display: flex;
+  gap: 8px;
+}
+
+.download-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: #F3F4F6;
+  border: 1px solid #E5E7EB;
+  border-radius: 4px;
+  color: #4B5563;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.download-btn:hover {
+  background: #E5E7EB;
+  color: #1F2937;
+  border-color: #D1D5DB;
+}
+
+.download-btn svg {
+  opacity: 0.8;
 }
 
 .report-tag {
